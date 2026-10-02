@@ -50,5 +50,6 @@ jobs:
           TWILIO_FROM_NUMBER:  ${{ secrets.TWILIO_FROM_NUMBER }}
           TO_PHONE_NUMBER:     ${{ secrets.TO_PHONE_NUMBER }}
           BOOKING_URL:         ${{ secrets.BOOKING_URL }}
+          BEARER_TOKEN:        ${{ secrets.BEARER_TOKEN }}
           SCAN_DAYS_AHEAD:     '60'
         run: python trial_slot_notifier.py --once
