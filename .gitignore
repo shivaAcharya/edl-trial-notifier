@@ -1,0 +1,21 @@
+# Virtual environment — never commit this
+venv/
+.venv/
+env/
+
+# Credentials — use GitHub Secrets instead
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# macOS
+.DS_Store
+.DS_Store?
+
+# IDE
+.vscode/
+.idea/

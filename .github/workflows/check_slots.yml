@@ -1,0 +1,54 @@
+# .github/workflows/check_slots.yml
+#
+# Runs a slot availability check every 5 minutes using GitHub Actions (free).
+# Sensitive values are stored as GitHub Secrets — never in code.
+#
+# Setup steps:
+#   1. Push this repo to GitHub (can be public — secrets are never exposed)
+#   2. Go to: Settings → Secrets and variables → Actions → New repository secret
+#   3. Add each secret listed in the "env:" block below
+#   4. Enable Actions: Actions tab → "I understand my workflows, go ahead and enable them"
+
+name: EDL Trial Slot Check
+
+on:
+  schedule:
+    # Runs every 5 minutes (GitHub Actions minimum granularity)
+    # Note: GitHub may delay runs by a few minutes during high load — acceptable here
+    - cron: '*/5 * * * *'
+
+  # Allows you to trigger a check manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  check-slots:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check for available trial slots
+        env:
+          TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER:  ${{ secrets.TWILIO_FROM_NUMBER }}
+          TO_PHONE_NUMBER:     ${{ secrets.TO_PHONE_NUMBER }}
+          BOOKING_URL:         ${{ secrets.BOOKING_URL }}
+          SCAN_DAYS_AHEAD:     '60'
+        run: python trial_slot_notifier.py --once
