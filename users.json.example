@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Your Name",
+    "booking_url": "https://edlvrs.lumbini.gov.np/edl/YOUR-UUID-HERE",
+    "bearer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "ntfy_topic": "your-private-ntfy-topic"
+  },
+  {
+    "name": "Friend Name",
+    "booking_url": "https://edlvrs.lumbini.gov.np/edl/FRIEND-UUID-HERE",
+    "bearer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "ntfy_topic": "friend-private-ntfy-topic"
+  }
+]

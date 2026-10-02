@@ -1,26 +1,32 @@
 #!/usr/bin/env python3
 # trial_slot_notifier.py - Monitors Nepal EDL portal for available trial slots
-# and sends a push notification via ntfy.sh when a slot opens up.
+# and sends push notifications via ntfy.sh when slots open up.
 #
-# Reusable: change BOOKING_URL, BEARER_TOKEN, and NTFY_TOPIC in .env.
+# Supports multiple applicants in a single run via users.json.
 #
 # Usage:
 #   pip install -r requirements.txt
-#   cp .env.example .env        # fill in your values
+#   cp users.json.example users.json   # fill in each applicant's details
 #
 #   python trial_slot_notifier.py           # continuous polling (every 5 min)
-#   python trial_slot_notifier.py --test    # verify API + send a test push, then exit
-#   python trial_slot_notifier.py --once    # check once and exit (used by GitHub Actions)
+#   python trial_slot_notifier.py --test    # verify API + push for all users, then exit
+#   python trial_slot_notifier.py --once    # check all users once and exit (GitHub Actions)
 #
-# IMPORTANT — Bearer token:
-#   The API requires a JWT from the EDL portal. It lasts 15 days.
-#   To renew: open your booking page in Chrome → F12 → Network tab → reload →
-#   click the date-availability request → Headers tab → copy the Authorization
-#   value (everything after "Bearer ") → paste into BEARER_TOKEN in .env.
+# users.json format:
+#   [
+#     {
+#       "name": "Shiva",
+#       "booking_url": "https://edlvrs.lumbini.gov.np/edl/YOUR-UUID",
+#       "bearer_token": "eyJ...",
+#       "ntfy_topic": "your-private-topic"
+#     },
+#     { ... next applicant ... }
+#   ]
 #
-# Push notifications via ntfy.sh:
-#   Install the ntfy app (iOS / Android) and subscribe to your NTFY_TOPIC.
-#   Tapping the notification opens the booking page directly.
+# Bearer token renewal (every 15 days per user):
+#   Open the booking page in Chrome → F12 → Network tab → reload →
+#   click the date-availability request → Headers tab → copy the
+#   Authorization value (after "Bearer ") → paste into users.json.
 
 import argparse
 import base64
@@ -36,14 +42,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Config (all values come from .env) ──────────────────────────────────────
-BOOKING_URL     = os.getenv("BOOKING_URL", "").strip()
-BEARER_TOKEN    = os.getenv("BEARER_TOKEN", "").strip()
-NTFY_TOPIC      = os.getenv("NTFY_TOPIC", "").strip()
+# ── Global config (from .env — applies to all users) ─────────────────────────
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))   # default: 5 min
 SCAN_DAYS_AHEAD = int(os.getenv("SCAN_DAYS_AHEAD", "60"))          # default: 60 days
+USERS_FILE      = os.getenv("USERS_FILE", "users.json")
 
-# Warn by push when token expires within this many days
 TOKEN_WARN_DAYS = 2
 
 NTFY_URL    = "https://ntfy.sh"
@@ -61,12 +64,37 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+# ── User config ───────────────────────────────────────────────────────────────
+
+def load_users() -> list:
+    """Load and validate user configurations from users.json."""
+    if not os.path.exists(USERS_FILE):
+        raise SystemExit(
+            f"'{USERS_FILE}' not found.\n"
+            "Copy users.json.example to users.json and fill in the values."
+        )
+    with open(USERS_FILE) as f:
+        users = json.load(f)
+
+    if not isinstance(users, list) or not users:
+        raise SystemExit(f"'{USERS_FILE}' must be a non-empty JSON array of user objects.")
+
+    required = {"booking_url", "bearer_token", "ntfy_topic"}
+    for i, user in enumerate(users):
+        missing = [k for k in required if not user.get(k, "").strip()]
+        if missing:
+            label = user.get("name", f"entry [{i}]")
+            raise SystemExit(f"User '{label}' is missing required fields: {', '.join(missing)}")
+
+    return users
+
+
 # ── Token helpers ─────────────────────────────────────────────────────────────
 
-def decode_token_expiry() -> datetime | None:
-    """Return the expiry datetime from the JWT, or None if it can't be parsed."""
+def decode_token_expiry(token: str) -> datetime | None:
+    """Return the JWT expiry as a datetime, or None if the token can't be parsed."""
     try:
-        payload_b64 = BEARER_TOKEN.split(".")[1]
+        payload_b64 = token.split(".")[1]
         payload_b64 += "=" * (-len(payload_b64) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
         return datetime.fromtimestamp(payload["exp"])
@@ -74,33 +102,38 @@ def decode_token_expiry() -> datetime | None:
         return None
 
 
-def check_token_validity() -> None:
-    """Log token expiry at startup. Exit immediately if already expired."""
-    exp = decode_token_expiry()
+def check_token_validity(user: dict) -> None:
+    """
+    Log token expiry for a user at startup.
+    Raises SystemExit if the token is already expired.
+    """
+    name = user.get("name", "user")
+    exp = decode_token_expiry(user["bearer_token"])
+
     if exp is None:
-        log.warning("Could not decode token expiry — proceeding anyway.")
+        log.warning("[%s] Could not decode token expiry — proceeding anyway.", name)
         return
 
     remaining = exp - datetime.now()
 
     if remaining.total_seconds() <= 0:
         raise SystemExit(
-            f"BEARER_TOKEN expired at {exp.strftime('%Y-%m-%d %H:%M')}.\n"
-            "Renew it:\n"
-            "  1. Open your booking page in Chrome\n"
-            "  2. F12 → Network tab → reload the page\n"
-            "  3. Click the 'date-availability' request\n"
-            "  4. Copy the Authorization header value (after 'Bearer ')\n"
-            "  5. Paste it as BEARER_TOKEN in .env (or GitHub Secret)"
+            f"[{name}] BEARER_TOKEN expired at {exp.strftime('%Y-%m-%d %H:%M')}.\n"
+            "Renew it in users.json:\n"
+            "  1. Open the booking page in Chrome\n"
+            "  2. F12 → Network tab → reload\n"
+            "  3. Click 'date-availability' → Headers tab\n"
+            "  4. Copy Authorization value (after 'Bearer ')\n"
+            "  5. Paste it as bearer_token in users.json"
         )
 
     days_left = remaining.days
     if days_left < TOKEN_WARN_DAYS:
-        log.warning("Token expires in %d day(s) on %s — renew soon!",
-                    days_left, exp.strftime("%Y-%m-%d %H:%M"))
+        log.warning("[%s] Token expires in %d day(s) on %s — renew soon!",
+                    name, days_left, exp.strftime("%Y-%m-%d %H:%M"))
     else:
-        log.info("Token expires  : %s (%d days remaining)",
-                 exp.strftime("%Y-%m-%d %H:%M"), days_left)
+        log.info("[%s] Token expires: %s (%d days remaining)",
+                 name, exp.strftime("%Y-%m-%d %H:%M"), days_left)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -112,38 +145,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test", "-t",
         action="store_true",
-        help="Check the API once, print results, send a test push, then exit",
+        help="Check API and send a test push for every user in users.json, then exit",
     )
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Check once and exit without looping (used by GitHub Actions cron)",
+        help="Check all users once and exit without looping (used by GitHub Actions)",
     )
     return parser.parse_args()
 
 
-def validate_config() -> None:
-    """Exit early if any required .env variable is missing."""
-    required = {
-        "BOOKING_URL": BOOKING_URL,
-        "BEARER_TOKEN": BEARER_TOKEN,
-        "NTFY_TOPIC": NTFY_TOPIC,
-    }
-    missing = [k for k, v in required.items() if not v]
-    if missing:
-        raise SystemExit(
-            f"Missing required .env variables: {', '.join(missing)}\n"
-            "Copy .env.example to .env and fill in the values."
-        )
-
-
 def extract_uuid(url: str) -> str:
-    """Pull the application UUID from the last segment of the booking URL."""
     return urlparse(url).path.rstrip("/").split("/")[-1]
 
 
-def fetch_availability(uuid: str) -> list:
-    """Call the EDL API and return the list of date objects for the scan window."""
+def fetch_availability(user: dict) -> list:
+    """Call the EDL API for a specific user and return the list of date objects."""
+    uuid = extract_uuid(user["booking_url"])
     today = date.today()
     params = {
         "type": "TRIAL",
@@ -152,7 +170,7 @@ def fetch_availability(uuid: str) -> list:
         "application_uuid": uuid,
     }
     headers = {
-        "Authorization": f"Bearer {BEARER_TOKEN}",
+        "Authorization": f"Bearer {user['bearer_token']}",
         "Origin": "https://edlvrs.lumbini.gov.np",
         "Referer": "https://edlvrs.lumbini.gov.np/",
     }
@@ -160,97 +178,95 @@ def fetch_availability(uuid: str) -> list:
 
     if response.status_code == 401:
         raise PermissionError(
-            "API returned 401 — Bearer token has expired.\n"
-            "Update BEARER_TOKEN in .env (or GitHub Secret) with a fresh token."
+            f"[{user.get('name', 'user')}] API returned 401 — Bearer token has expired."
         )
 
     response.raise_for_status()
     return response.json().get("data", [])
 
 
-def push(title: str, body: str, priority: str = "default", tags: str = "bell") -> None:
+def push(user: dict, title: str, body: str,
+         priority: str = "default", tags: str = "bell") -> None:
     """
-    Send a push notification via ntfy.sh.
-
-    Tapping the notification opens the booking page directly.
-    Priority: min / low / default / high / urgent
-    Tags: ntfy emoji shortcodes, e.g. 'rotating_light', 'warning', 'white_check_mark'
+    Send a push notification to this user's ntfy topic.
+    Tapping the notification opens their booking page directly.
     """
     resp = requests.post(
-        f"{NTFY_URL}/{NTFY_TOPIC}",
+        f"{NTFY_URL}/{user['ntfy_topic']}",
         data=body.encode("utf-8"),
         headers={
             "Title": title,
             "Priority": priority,
             "Tags": tags,
-            "Click": BOOKING_URL,
+            "Click": user["booking_url"],
         },
         timeout=15,
     )
     resp.raise_for_status()
-    log.info("Push sent → ntfy.sh/%s [%s]", NTFY_TOPIC, title)
+    log.info("[%s] Push sent → ntfy.sh/%s", user.get("name", "user"), user["ntfy_topic"])
 
 
 # ── Core logic ────────────────────────────────────────────────────────────────
 
-def maybe_warn_token_expiry(token_warned: list) -> None:
-    """Send a one-time push warning if the token is about to expire."""
+def maybe_warn_token_expiry(user: dict, token_warned: list) -> None:
+    """Send a one-time push if this user's token is about to expire."""
     if token_warned:
         return
-    exp = decode_token_expiry()
+    exp = decode_token_expiry(user["bearer_token"])
     if exp is None:
         return
     remaining = exp - datetime.now()
     if 0 < remaining.total_seconds() < TOKEN_WARN_DAYS * 86400:
         try:
             push(
+                user,
                 title="EDL Notifier - Token expiring soon",
                 body=(
                     f"Bearer token expires {exp.strftime('%Y-%m-%d')} "
                     f"({remaining.days}d left).\n"
-                    "Renew BEARER_TOKEN in .env to keep monitoring."
+                    "Update bearer_token in users.json to keep monitoring."
                 ),
                 priority="high",
                 tags="warning",
             )
             token_warned.append(True)
-            log.warning("Token expiry warning push sent.")
+            log.warning("[%s] Token expiry warning push sent.", user.get("name"))
         except Exception as exc:
-            log.error("Could not send token warning push: %s", exc)
+            log.error("[%s] Could not send token warning: %s", user.get("name"), exc)
 
 
-def check_and_notify(uuid: str, already_notified: set, token_warned: list) -> set:
+def check_and_notify(user: dict, already_notified: set, token_warned: list) -> set:
     """
-    Fetch availability, compare against already-notified dates, and push
-    for any newly available slots.
+    Fetch availability for one user, compare against already-notified dates,
+    and push for any newly available slots.
 
-    Returns the updated set of notified dates.
+    On a 401, sends a STOPPED notification to that user but does NOT exit —
+    other users in the list continue to be monitored.
+
+    Returns the updated set of notified dates for this user.
     """
-    maybe_warn_token_expiry(token_warned)
+    name = user.get("name", "user")
+    maybe_warn_token_expiry(user, token_warned)
 
     try:
-        slots = fetch_availability(uuid)
+        slots = fetch_availability(user)
     except PermissionError as exc:
         log.critical(str(exc))
         try:
-            push(
-                title="EDL Notifier - STOPPED",
-                body="Bearer token expired. Renew it to resume monitoring.",
-                priority="urgent",
-                tags="no_entry",
-            )
+            push(user,
+                 title="EDL Notifier - STOPPED",
+                 body="Bearer token expired. Update bearer_token in users.json to resume.",
+                 priority="urgent", tags="no_entry")
         except Exception:
             pass
-        raise SystemExit(1)
+        # Skip this user but keep running for others
+        return already_notified
     except requests.RequestException as exc:
-        log.error("API request failed: %s", exc)
+        log.error("[%s] API request failed: %s", name, exc)
         return already_notified
 
-    # Bookable: flag is True AND at least one seat is open
     bookable = [s for s in slots if s.get("is_bookable") and s.get("available", 0) > 0]
     bookable_dates = {s["date"] for s in bookable}
-
-    # New = bookable now but not yet notified
     new_slots = [s for s in bookable if s["date"] not in already_notified]
 
     if new_slots:
@@ -258,84 +274,78 @@ def check_and_notify(uuid: str, already_notified: set, token_warned: list) -> se
             f"{s['date']} ({s['available']} slot{'s' if s['available'] != 1 else ''})"
             for s in new_slots
         )
-        body = f"Available dates: {summary}\nTap to open booking page."
-        log.info("New slot(s) found: %s", summary)
+        log.info("[%s] New slot(s) found: %s", name, summary)
         try:
-            push(
-                title="EDL Trial Slot Available!",
-                body=body,
-                priority="urgent",
-                tags="rotating_light",
-            )
+            push(user,
+                 title="EDL Trial Slot Available!",
+                 body=f"Available dates: {summary}\nTap to open booking page.",
+                 priority="urgent", tags="rotating_light")
         except Exception as exc:
-            log.error("Push failed: %s", exc)
+            log.error("[%s] Push failed: %s", name, exc)
             return already_notified  # retry next cycle
 
         already_notified.update(s["date"] for s in new_slots)
     else:
-        log.info(
-            "No new slots. Next check in %ds. (Bookable now: %s)",
-            POLL_INTERVAL,
-            ", ".join(sorted(bookable_dates)) or "none",
-        )
+        log.info("[%s] No new slots. (Bookable now: %s)",
+                 name, ", ".join(sorted(bookable_dates)) or "none")
 
     # Prune dates no longer bookable so we re-notify if they reopen
     already_notified &= bookable_dates
-
     return already_notified
 
 
 # ── Test mode ─────────────────────────────────────────────────────────────────
 
-def run_test(uuid: str) -> None:
-    """Verify token, hit the API, print results, send a test push notification."""
+def run_test(users: list) -> None:
+    """Verify API access and push connectivity for every user in users.json."""
     log.info("=" * 55)
-    log.info("TEST MODE — checking API and push connectivity")
+    log.info("TEST MODE — %d user(s)", len(users))
     log.info("=" * 55)
-    log.info("Fetching availability for UUID: %s", uuid)
-    log.info("Scan window: today → +%d days", SCAN_DAYS_AHEAD)
 
-    try:
-        slots = fetch_availability(uuid)
-    except PermissionError as exc:
-        log.error(str(exc))
-        raise SystemExit(1)
-    except requests.RequestException as exc:
-        log.error("API request FAILED: %s", exc)
-        raise SystemExit(1)
+    all_passed = True
+    for user in users:
+        name = user.get("name", "user")
+        log.info("--- %s ---", name)
+        log.info("  UUID     : %s", extract_uuid(user["booking_url"]))
+        log.info("  ntfy     : ntfy.sh/%s", user["ntfy_topic"])
 
-    log.info("API OK — received %d date entries", len(slots))
+        try:
+            slots = fetch_availability(user)
+            log.info("  API OK   : %d date entries", len(slots))
 
-    bookable = [s for s in slots if s.get("is_bookable") and s.get("available", 0) > 0]
-    if bookable:
-        log.info("Bookable slots found:")
-        for s in bookable:
-            log.info("  %s — %d available", s["date"], s["available"])
+            bookable = [s for s in slots if s.get("is_bookable") and s.get("available", 0) > 0]
+            if bookable:
+                log.info("  Bookable slots:")
+                for s in bookable:
+                    log.info("    %s — %d available", s["date"], s["available"])
+            else:
+                log.info("  No bookable slots right now (expected).")
+
+        except PermissionError as exc:
+            log.error("  %s", exc)
+            all_passed = False
+            continue
+        except requests.RequestException as exc:
+            log.error("  API FAILED: %s", exc)
+            all_passed = False
+            continue
+
+        try:
+            push(user,
+                 title="EDL Notifier - Test",
+                 body=f"[{name}] Setup is working. You will be notified here when a slot opens.",
+                 priority="default", tags="white_check_mark")
+            log.info("  Push OK  : check ntfy app.")
+        except Exception as exc:
+            log.error("  Push FAILED: %s", exc)
+            all_passed = False
+
+    log.info("=" * 55)
+    if all_passed:
+        log.info("All users passed. Ready to deploy.")
     else:
-        log.info("No bookable slots right now (expected if all full).")
-
-    log.info("Sample of returned dates (first 5):")
-    for s in slots[:5]:
-        log.info(
-            "  %s | total=%s booked=%s available=%s bookable=%s",
-            s["date"], s["total"], s["booked"], s["available"], s["is_bookable"],
-        )
-
-    log.info("Sending test push to ntfy.sh/%s ...", NTFY_TOPIC)
-    try:
-        push(
-            title="EDL Notifier - Test",
-            body="Setup is working. You'll be notified here when a slot opens.",
-            priority="default",
-            tags="white_check_mark",
-        )
-        log.info("Test push sent! Check your ntfy app.")
-    except Exception as exc:
-        log.error("Push FAILED: %s", exc)
+        log.warning("Some users failed — fix the errors above before deploying.")
         raise SystemExit(1)
-
-    log.info("=" * 55)
-    log.info("All checks passed. Ready to deploy.")
     log.info("=" * 55)
 
 
@@ -343,31 +353,37 @@ def run_test(uuid: str) -> None:
 
 def main() -> None:
     args = parse_args()
-    validate_config()
-    check_token_validity()
+    users = load_users()
 
-    uuid = extract_uuid(BOOKING_URL)
+    # Validate all tokens at startup — fail fast before polling begins
+    for user in users:
+        check_token_validity(user)
 
     log.info("━" * 55)
-    log.info("EDL Trial Slot Notifier")
-    log.info("Application UUID : %s", uuid)
-    log.info("Notify via       : ntfy.sh/%s", NTFY_TOPIC)
+    log.info("EDL Trial Slot Notifier — %d user(s)", len(users))
+    for user in users:
+        log.info("  %-20s ntfy.sh/%s", user.get("name", "?"), user["ntfy_topic"])
     log.info("Poll interval    : %ds", POLL_INTERVAL)
     log.info("Scan window      : %d days ahead", SCAN_DAYS_AHEAD)
     log.info("━" * 55)
 
     if args.test:
-        run_test(uuid)
+        run_test(users)
         return
 
-    notified: set = set()
-    token_warned: list = []
+    # Per-user state: set of already-notified dates + token-warned flag
+    state = [{"notified": set(), "token_warned": []} for _ in users]
 
     if args.once:
-        check_and_notify(uuid, notified, token_warned)
+        for i, user in enumerate(users):
+            check_and_notify(user, state[i]["notified"], state[i]["token_warned"])
     else:
         while True:
-            notified = check_and_notify(uuid, notified, token_warned)
+            for i, user in enumerate(users):
+                state[i]["notified"] = check_and_notify(
+                    user, state[i]["notified"], state[i]["token_warned"]
+                )
+            log.info("Next check in %ds.", POLL_INTERVAL)
             time.sleep(POLL_INTERVAL)
 
 

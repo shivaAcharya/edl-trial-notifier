@@ -1,23 +1,28 @@
 # .github/workflows/check_slots.yml
 #
-# Runs a slot availability check every 5 minutes using GitHub Actions (free).
-# Sensitive values are stored as GitHub Secrets — never in code.
+# Runs a slot availability check every 5 minutes for ALL users in users.json.
+# The full users.json content is stored as a single GitHub Secret (USERS_CONFIG)
+# so bearer tokens and ntfy topics are never committed to the repo.
 #
 # Setup steps:
 #   1. Push this repo to GitHub (can be public — secrets are never exposed)
 #   2. Go to: Settings → Secrets and variables → Actions → New repository secret
-#   3. Add each secret listed in the "env:" block below
-#   4. Enable Actions: Actions tab → "I understand my workflows, go ahead and enable them"
+#   3. Add ONE secret:
+#        USERS_CONFIG  →  paste the entire contents of your users.json here
+#   4. Enable Actions: Actions tab → "I understand my workflows, enable them"
+#
+# To add a friend: edit users.json locally, re-copy the full contents
+# into the USERS_CONFIG GitHub Secret.
 
 name: EDL Trial Slot Check
 
 on:
   schedule:
     # Runs every 5 minutes (GitHub Actions minimum granularity)
-    # Note: GitHub may delay runs by a few minutes during high load — acceptable here
+    # Note: runs may be delayed a few minutes during GitHub high-load periods
     - cron: '*/5 * * * *'
 
-  # Allows you to trigger a check manually from the Actions tab
+  # Allows manual trigger from the Actions tab
   workflow_dispatch:
 
 jobs:
@@ -43,10 +48,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check for available trial slots
+      - name: Write users config from secret
+        run: echo '${{ secrets.USERS_CONFIG }}' > users.json
+
+      - name: Check slots for all users
         env:
-          BOOKING_URL:    ${{ secrets.BOOKING_URL }}
-          BEARER_TOKEN:   ${{ secrets.BEARER_TOKEN }}
-          NTFY_TOPIC:     ${{ secrets.NTFY_TOPIC }}
           SCAN_DAYS_AHEAD: '60'
         run: python trial_slot_notifier.py --once

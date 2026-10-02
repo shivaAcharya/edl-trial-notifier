@@ -6,6 +6,9 @@ env/
 # Credentials — use GitHub Secrets instead
 .env
 
+# Per-user config with bearer tokens — stored as USERS_CONFIG GitHub Secret
+users.json
+
 # Python cache
 __pycache__/
 *.pyc
