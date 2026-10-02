@@ -23,7 +23,13 @@ on:
     - cron: '*/5 * * * *'
 
   # Allows manual trigger from the Actions tab
+  # Set mode to "test" to verify API + push for all users without looping.
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode: "once" (default) or "test" (sends a test push notification)'
+        required: false
+        default: 'once'
 
 jobs:
   check-slots:
@@ -55,4 +61,10 @@ jobs:
         env:
           NTFY_TOPIC:      ${{ secrets.NTFY_TOPIC }}
           SCAN_DAYS_AHEAD: '60'
-        run: python trial_slot_notifier.py --once
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          if [ "$MODE" = "test" ]; then
+            python trial_slot_notifier.py --test
+          else
+            python trial_slot_notifier.py --once
+          fi
