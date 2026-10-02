@@ -1,22 +1,26 @@
 #!/usr/bin/env python3
 # trial_slot_notifier.py - Monitors Nepal EDL portal for available trial slots
-# and sends an SMS via Twilio when a slot opens up.
+# and sends a push notification via ntfy.sh when a slot opens up.
 #
-# Reusable: change BOOKING_URL, TO_PHONE_NUMBER, and BEARER_TOKEN in .env.
+# Reusable: change BOOKING_URL, BEARER_TOKEN, and NTFY_TOPIC in .env.
 #
 # Usage:
 #   pip install -r requirements.txt
-#   cp .env.example .env        # fill in your credentials
+#   cp .env.example .env        # fill in your values
 #
 #   python trial_slot_notifier.py           # continuous polling (every 5 min)
-#   python trial_slot_notifier.py --test    # verify API + send a test SMS, then exit
+#   python trial_slot_notifier.py --test    # verify API + send a test push, then exit
 #   python trial_slot_notifier.py --once    # check once and exit (used by GitHub Actions)
 #
 # IMPORTANT — Bearer token:
 #   The API requires a JWT from the EDL portal. It lasts 15 days.
 #   To renew: open your booking page in Chrome → F12 → Network tab → reload →
-#   click the date-availability request → copy the Authorization header value
-#   (everything after "Bearer ") → paste into BEARER_TOKEN in .env.
+#   click the date-availability request → Headers tab → copy the Authorization
+#   value (everything after "Bearer ") → paste into BEARER_TOKEN in .env.
+#
+# Push notifications via ntfy.sh:
+#   Install the ntfy app (iOS / Android) and subscribe to your NTFY_TOPIC.
+#   Tapping the notification opens the booking page directly.
 
 import argparse
 import base64
@@ -29,24 +33,21 @@ from urllib.parse import urlparse
 
 import requests
 from dotenv import load_dotenv
-from twilio.rest import Client
 
 load_dotenv()
 
 # ── Config (all values come from .env) ──────────────────────────────────────
 BOOKING_URL     = os.getenv("BOOKING_URL", "").strip()
 BEARER_TOKEN    = os.getenv("BEARER_TOKEN", "").strip()
-TO_PHONE        = os.getenv("TO_PHONE_NUMBER", "").strip()
-TWILIO_SID      = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
-TWILIO_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
-TWILIO_FROM     = os.getenv("TWILIO_FROM_NUMBER", "").strip()
+NTFY_TOPIC      = os.getenv("NTFY_TOPIC", "").strip()
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))   # default: 5 min
 SCAN_DAYS_AHEAD = int(os.getenv("SCAN_DAYS_AHEAD", "60"))          # default: 60 days
 
-# Warn by SMS when token expires within this many days
+# Warn by push when token expires within this many days
 TOKEN_WARN_DAYS = 2
 
-API_URL = (
+NTFY_URL    = "https://ntfy.sh"
+EDL_API_URL = (
     "https://edl-public-api.lumbini.gov.np"
     "/api/v1/web/applicant/application/date-availability"
 )
@@ -74,10 +75,7 @@ def decode_token_expiry() -> datetime | None:
 
 
 def check_token_validity() -> None:
-    """
-    Log the token expiry. Raise SystemExit if already expired.
-    Returns without error if token looks fine.
-    """
+    """Log token expiry at startup. Exit immediately if already expired."""
     exp = decode_token_expiry()
     if exp is None:
         log.warning("Could not decode token expiry — proceeding anyway.")
@@ -109,12 +107,12 @@ def check_token_validity() -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="EDL Trial Slot Notifier — monitors and texts when slots open"
+        description="EDL Trial Slot Notifier — monitors and pushes when slots open"
     )
     parser.add_argument(
         "--test", "-t",
         action="store_true",
-        help="Check the API once, print results, send a test SMS, then exit",
+        help="Check the API once, print results, send a test push, then exit",
     )
     parser.add_argument(
         "--once",
@@ -125,14 +123,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_config() -> None:
-    """Raise early if any required .env variable is missing."""
+    """Exit early if any required .env variable is missing."""
     required = {
         "BOOKING_URL": BOOKING_URL,
         "BEARER_TOKEN": BEARER_TOKEN,
-        "TO_PHONE_NUMBER": TO_PHONE,
-        "TWILIO_ACCOUNT_SID": TWILIO_SID,
-        "TWILIO_AUTH_TOKEN": TWILIO_TOKEN,
-        "TWILIO_FROM_NUMBER": TWILIO_FROM,
+        "NTFY_TOPIC": NTFY_TOPIC,
     }
     missing = [k for k, v in required.items() if not v]
     if missing:
@@ -148,7 +143,7 @@ def extract_uuid(url: str) -> str:
 
 
 def fetch_availability(uuid: str) -> list:
-    """Call the API and return the full list of date objects for the scan window."""
+    """Call the EDL API and return the list of date objects for the scan window."""
     today = date.today()
     params = {
         "type": "TRIAL",
@@ -161,11 +156,11 @@ def fetch_availability(uuid: str) -> list:
         "Origin": "https://edlvrs.lumbini.gov.np",
         "Referer": "https://edlvrs.lumbini.gov.np/",
     }
-    response = requests.get(API_URL, params=params, headers=headers, timeout=15)
+    response = requests.get(EDL_API_URL, params=params, headers=headers, timeout=15)
 
     if response.status_code == 401:
         raise PermissionError(
-            "API returned 401 Unauthorized — Bearer token has expired.\n"
+            "API returned 401 — Bearer token has expired.\n"
             "Update BEARER_TOKEN in .env (or GitHub Secret) with a fresh token."
         )
 
@@ -173,53 +168,77 @@ def fetch_availability(uuid: str) -> list:
     return response.json().get("data", [])
 
 
-def send_sms(body: str) -> None:
-    """Send an SMS via Twilio."""
-    client = Client(TWILIO_SID, TWILIO_TOKEN)
-    client.messages.create(body=body, from_=TWILIO_FROM, to=TO_PHONE)
-    log.info("SMS sent to %s", TO_PHONE)
+def push(title: str, body: str, priority: str = "default", tags: str = "bell") -> None:
+    """
+    Send a push notification via ntfy.sh.
+
+    Tapping the notification opens the booking page directly.
+    Priority: min / low / default / high / urgent
+    Tags: ntfy emoji shortcodes, e.g. 'rotating_light', 'warning', 'white_check_mark'
+    """
+    resp = requests.post(
+        f"{NTFY_URL}/{NTFY_TOPIC}",
+        data=body.encode("utf-8"),
+        headers={
+            "Title": title,
+            "Priority": priority,
+            "Tags": tags,
+            "Click": BOOKING_URL,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    log.info("Push sent → ntfy.sh/%s [%s]", NTFY_TOPIC, title)
 
 
 # ── Core logic ────────────────────────────────────────────────────────────────
 
-def maybe_warn_token_expiry_by_sms() -> None:
-    """Send a one-time SMS warning if the token is about to expire."""
+def maybe_warn_token_expiry(token_warned: list) -> None:
+    """Send a one-time push warning if the token is about to expire."""
+    if token_warned:
+        return
     exp = decode_token_expiry()
     if exp is None:
         return
     remaining = exp - datetime.now()
     if 0 < remaining.total_seconds() < TOKEN_WARN_DAYS * 86400:
         try:
-            send_sms(
-                f"[EDL Notifier] Token expires {exp.strftime('%Y-%m-%d')} "
-                f"({remaining.days}d left). Renew BEARER_TOKEN to keep monitoring."
+            push(
+                title="EDL Notifier - Token expiring soon",
+                body=(
+                    f"Bearer token expires {exp.strftime('%Y-%m-%d')} "
+                    f"({remaining.days}d left).\n"
+                    "Renew BEARER_TOKEN in .env to keep monitoring."
+                ),
+                priority="high",
+                tags="warning",
             )
-            log.warning("Token expiry warning SMS sent.")
+            token_warned.append(True)
+            log.warning("Token expiry warning push sent.")
         except Exception as exc:
-            log.error("Could not send token warning SMS: %s", exc)
+            log.error("Could not send token warning push: %s", exc)
 
 
 def check_and_notify(uuid: str, already_notified: set, token_warned: list) -> set:
     """
-    Fetch availability, compare against already-notified dates, and send SMS
+    Fetch availability, compare against already-notified dates, and push
     for any newly available slots.
 
     Returns the updated set of notified dates.
-    token_warned is a mutable list used as a flag to avoid repeated warning SMS.
     """
-    # Send token expiry warning SMS once per session if expiry is close
-    if not token_warned:
-        exp = decode_token_expiry()
-        if exp and 0 < (exp - datetime.now()).total_seconds() < TOKEN_WARN_DAYS * 86400:
-            maybe_warn_token_expiry_by_sms()
-            token_warned.append(True)
+    maybe_warn_token_expiry(token_warned)
 
     try:
         slots = fetch_availability(uuid)
     except PermissionError as exc:
         log.critical(str(exc))
         try:
-            send_sms("[EDL Notifier] STOPPED — Bearer token expired. Renew it to resume.")
+            push(
+                title="EDL Notifier - STOPPED",
+                body="Bearer token expired. Renew it to resume monitoring.",
+                priority="urgent",
+                tags="no_entry",
+            )
         except Exception:
             pass
         raise SystemExit(1)
@@ -227,11 +246,11 @@ def check_and_notify(uuid: str, already_notified: set, token_warned: list) -> se
         log.error("API request failed: %s", exc)
         return already_notified
 
-    # Bookable: is_bookable flag is True AND at least one seat is open
+    # Bookable: flag is True AND at least one seat is open
     bookable = [s for s in slots if s.get("is_bookable") and s.get("available", 0) > 0]
     bookable_dates = {s["date"] for s in bookable}
 
-    # New = bookable now but not yet texted about
+    # New = bookable now but not yet notified
     new_slots = [s for s in bookable if s["date"] not in already_notified]
 
     if new_slots:
@@ -239,17 +258,18 @@ def check_and_notify(uuid: str, already_notified: set, token_warned: list) -> se
             f"{s['date']} ({s['available']} slot{'s' if s['available'] != 1 else ''})"
             for s in new_slots
         )
-        message = (
-            f"[EDL Trial Slot Alert]\n"
-            f"Available dates: {summary}\n"
-            f"Book now: {BOOKING_URL}"
-        )
+        body = f"Available dates: {summary}\nTap to open booking page."
         log.info("New slot(s) found: %s", summary)
         try:
-            send_sms(message)
+            push(
+                title="EDL Trial Slot Available!",
+                body=body,
+                priority="urgent",
+                tags="rotating_light",
+            )
         except Exception as exc:
-            log.error("Failed to send SMS: %s", exc)
-            return already_notified
+            log.error("Push failed: %s", exc)
+            return already_notified  # retry next cycle
 
         already_notified.update(s["date"] for s in new_slots)
     else:
@@ -268,14 +288,10 @@ def check_and_notify(uuid: str, already_notified: set, token_warned: list) -> se
 # ── Test mode ─────────────────────────────────────────────────────────────────
 
 def run_test(uuid: str) -> None:
-    """
-    Test mode: verify token, hit the API, print results, send a test SMS.
-    Run this before deploying to confirm everything is wired up correctly.
-    """
+    """Verify token, hit the API, print results, send a test push notification."""
     log.info("=" * 55)
-    log.info("TEST MODE — checking API and SMS connectivity")
+    log.info("TEST MODE — checking API and push connectivity")
     log.info("=" * 55)
-
     log.info("Fetching availability for UUID: %s", uuid)
     log.info("Scan window: today → +%d days", SCAN_DAYS_AHEAD)
 
@@ -291,16 +307,12 @@ def run_test(uuid: str) -> None:
     log.info("API OK — received %d date entries", len(slots))
 
     bookable = [s for s in slots if s.get("is_bookable") and s.get("available", 0) > 0]
-
     if bookable:
         log.info("Bookable slots found:")
         for s in bookable:
             log.info("  %s — %d available", s["date"], s["available"])
     else:
-        log.info(
-            "No bookable slots right now (expected if all full). "
-            "Will alert as soon as one opens."
-        )
+        log.info("No bookable slots right now (expected if all full).")
 
     log.info("Sample of returned dates (first 5):")
     for s in slots[:5]:
@@ -309,16 +321,17 @@ def run_test(uuid: str) -> None:
             s["date"], s["total"], s["booked"], s["available"], s["is_bookable"],
         )
 
-    log.info("Sending test SMS to %s ...", TO_PHONE)
+    log.info("Sending test push to ntfy.sh/%s ...", NTFY_TOPIC)
     try:
-        send_sms(
-            f"[EDL Notifier — Test]\n"
-            f"Setup is working correctly.\n"
-            f"Monitoring: {BOOKING_URL}"
+        push(
+            title="EDL Notifier - Test",
+            body="Setup is working. You'll be notified here when a slot opens.",
+            priority="default",
+            tags="white_check_mark",
         )
-        log.info("Test SMS sent successfully!")
+        log.info("Test push sent! Check your ntfy app.")
     except Exception as exc:
-        log.error("SMS FAILED: %s", exc)
+        log.error("Push FAILED: %s", exc)
         raise SystemExit(1)
 
     log.info("=" * 55)
@@ -338,7 +351,7 @@ def main() -> None:
     log.info("━" * 55)
     log.info("EDL Trial Slot Notifier")
     log.info("Application UUID : %s", uuid)
-    log.info("Notify           : %s", TO_PHONE)
+    log.info("Notify via       : ntfy.sh/%s", NTFY_TOPIC)
     log.info("Poll interval    : %ds", POLL_INTERVAL)
     log.info("Scan window      : %d days ahead", SCAN_DAYS_AHEAD)
     log.info("━" * 55)
