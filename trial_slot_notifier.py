@@ -24,9 +24,9 @@
 #   ]
 #
 # Bearer token renewal (every 15 days per user):
-#   Open the booking page in Chrome → F12 → Network tab → reload →
-#   click the date-availability request → Headers tab → copy the
-#   Authorization value (after "Bearer ") → paste into users.json.
+#   Run:  python refresh_token.py
+#   It walks through the OTP login flow and updates users.json automatically.
+#   (No browser DevTools needed once application_id is stored in users.json.)
 
 import argparse
 import base64

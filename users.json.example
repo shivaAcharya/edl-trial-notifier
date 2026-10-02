@@ -2,11 +2,13 @@
   {
     "name": "Shiva",
     "booking_url": "https://edlvrs.lumbini.gov.np/edl/YOUR-UUID-HERE",
-    "bearer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    "bearer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "application_id": "N562101"
   },
   {
     "name": "Friend Name",
     "booking_url": "https://edlvrs.lumbini.gov.np/edl/FRIEND-UUID-HERE",
-    "bearer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    "bearer_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+    "application_id": "N999999"
   }
 ]
