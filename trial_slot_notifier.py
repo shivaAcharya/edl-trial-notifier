@@ -17,8 +17,8 @@
 #     {
 #       "name": "Shiva",
 #       "booking_url": "https://edlvrs.lumbini.gov.np/edl/YOUR-UUID",
-#       "bearer_token": "eyJ...",
-#       "ntfy_topic": "your-private-topic"
+#       "bearer_token": "eyJ..."
+#       // ntfy_topic is optional — omit to use the global NTFY_TOPIC from .env
 #     },
 #     { ... next applicant ... }
 #   ]
@@ -46,6 +46,7 @@ load_dotenv()
 POLL_INTERVAL   = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))   # default: 5 min
 SCAN_DAYS_AHEAD = int(os.getenv("SCAN_DAYS_AHEAD", "60"))          # default: 60 days
 USERS_FILE      = os.getenv("USERS_FILE", "users.json")
+DEFAULT_NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()           # shared fallback topic
 
 TOKEN_WARN_DAYS = 2
 
@@ -79,12 +80,19 @@ def load_users() -> list:
     if not isinstance(users, list) or not users:
         raise SystemExit(f"'{USERS_FILE}' must be a non-empty JSON array of user objects.")
 
-    required = {"booking_url", "bearer_token", "ntfy_topic"}
+    required = {"booking_url", "bearer_token"}
     for i, user in enumerate(users):
         missing = [k for k in required if not user.get(k, "").strip()]
         if missing:
             label = user.get("name", f"entry [{i}]")
             raise SystemExit(f"User '{label}' is missing required fields: {', '.join(missing)}")
+        # ntfy_topic is optional per-user; falls back to global NTFY_TOPIC from .env
+        if not user.get("ntfy_topic", "").strip() and not DEFAULT_NTFY_TOPIC:
+            label = user.get("name", f"entry [{i}]")
+            raise SystemExit(
+                f"User '{label}' has no ntfy_topic, and NTFY_TOPIC is not set in .env.\n"
+                "Set NTFY_TOPIC in .env or add ntfy_topic to each user entry."
+            )
 
     return users
 
@@ -189,10 +197,12 @@ def push(user: dict, title: str, body: str,
          priority: str = "default", tags: str = "bell") -> None:
     """
     Send a push notification to this user's ntfy topic.
+    Uses the user's own ntfy_topic if set, otherwise the global NTFY_TOPIC from .env.
     Tapping the notification opens their booking page directly.
     """
+    topic = user.get("ntfy_topic", "").strip() or DEFAULT_NTFY_TOPIC
     resp = requests.post(
-        f"{NTFY_URL}/{user['ntfy_topic']}",
+        f"{NTFY_URL}/{topic}",
         data=body.encode("utf-8"),
         headers={
             "Title": title,
@@ -203,7 +213,7 @@ def push(user: dict, title: str, body: str,
         timeout=15,
     )
     resp.raise_for_status()
-    log.info("[%s] Push sent → ntfy.sh/%s", user.get("name", "user"), user["ntfy_topic"])
+    log.info("[%s] Push sent → ntfy.sh/%s", user.get("name", "user"), topic)
 
 
 # ── Core logic ────────────────────────────────────────────────────────────────
@@ -307,7 +317,7 @@ def run_test(users: list) -> None:
         name = user.get("name", "user")
         log.info("--- %s ---", name)
         log.info("  UUID     : %s", extract_uuid(user["booking_url"]))
-        log.info("  ntfy     : ntfy.sh/%s", user["ntfy_topic"])
+        log.info("  ntfy     : ntfy.sh/%s", user.get("ntfy_topic", "").strip() or DEFAULT_NTFY_TOPIC)
 
         try:
             slots = fetch_availability(user)
@@ -362,7 +372,8 @@ def main() -> None:
     log.info("━" * 55)
     log.info("EDL Trial Slot Notifier — %d user(s)", len(users))
     for user in users:
-        log.info("  %-20s ntfy.sh/%s", user.get("name", "?"), user["ntfy_topic"])
+        topic = user.get("ntfy_topic", "").strip() or DEFAULT_NTFY_TOPIC
+        log.info("  %-20s ntfy.sh/%s", user.get("name", "?"), topic)
     log.info("Poll interval    : %ds", POLL_INTERVAL)
     log.info("Scan window      : %d days ahead", SCAN_DAYS_AHEAD)
     log.info("━" * 55)

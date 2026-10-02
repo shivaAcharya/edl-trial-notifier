@@ -53,5 +53,6 @@ jobs:
 
       - name: Check slots for all users
         env:
+          NTFY_TOPIC:      ${{ secrets.NTFY_TOPIC }}
           SCAN_DAYS_AHEAD: '60'
         run: python trial_slot_notifier.py --once
