@@ -4,25 +4,34 @@
 # The full users.json content is stored as a single GitHub Secret (USERS_CONFIG)
 # so bearer tokens and ntfy topics are never committed to the repo.
 #
-# Setup steps:
-#   1. Push this repo to GitHub (can be public — secrets are never exposed)
-#   2. Go to: Settings → Secrets and variables → Actions → New repository secret
-#   3. Add ONE secret:
-#        USERS_CONFIG  →  paste the entire contents of your users.json here
-#   4. Enable Actions: Actions tab → "I understand my workflows, enable them"
+# ── Scheduling ────────────────────────────────────────────────────────────────
+# Primary trigger: cron-job.org fires a workflow_dispatch POST every 5 minutes.
+#   → Reliable 5-minute polling (GitHub's built-in cron is throttled for
+#     high-frequency schedules and routinely runs only every 1–6 hours.)
 #
-# To add a friend: edit users.json locally, re-copy the full contents
-# into the USERS_CONFIG GitHub Secret.
+# Fallback: the schedule below runs once per hour in case cron-job.org is down.
+#
+# cron-job.org setup:
+#   URL    : https://api.github.com/repos/shivaAcharya/edl-trial-notifier
+#                /actions/workflows/check_slots.yml/dispatches
+#   Method : POST
+#   Headers: Authorization: Bearer {GITHUB_PAT}   (Actions: Read+Write scope)
+#            Accept: application/vnd.github+json
+#            X-GitHub-Api-Version: 2022-11-28
+#            Content-Type: application/json
+#   Body   : {"ref": "main"}
+#   Schedule: every 5 minutes
+# ─────────────────────────────────────────────────────────────────────────────
 
 name: EDL Trial Slot Check
 
 on:
   schedule:
-    # Runs every 5 minutes (GitHub Actions minimum granularity)
-    # Note: runs may be delayed a few minutes during GitHub high-load periods
-    - cron: '*/5 * * * *'
+    # Hourly fallback — primary scheduling is handled by cron-job.org
+    - cron: '0 * * * *'
 
-  # Allows manual trigger from the Actions tab
+  # Primary trigger: cron-job.org POSTs here every 5 minutes.
+  # Also used for manual runs from the Actions tab.
   # Set mode to "test" to verify API + push for all users without looping.
   workflow_dispatch:
     inputs:
