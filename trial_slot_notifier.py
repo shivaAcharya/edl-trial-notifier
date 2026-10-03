@@ -344,7 +344,7 @@ def run_test(users: list) -> None:
             push(user,
                  title="EDL Notifier - Test",
                  body=f"[{name}] Setup is working. You will be notified here when a slot opens.",
-                 priority="default", tags="white_check_mark")
+                 priority="max", tags="white_check_mark")
             log.info("  Push OK  : check ntfy app.")
         except Exception as exc:
             log.error("  Push FAILED: %s", exc)
