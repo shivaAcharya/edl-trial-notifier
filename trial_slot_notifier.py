@@ -194,22 +194,26 @@ def fetch_availability(user: dict) -> list:
 
 
 def push(user: dict, title: str, body: str,
-         priority: str = "default", tags: str = "bell") -> None:
+         priority: str = "default", tags: str = "bell",
+         actions: str | None = None) -> None:
     """
     Send a push notification to this user's ntfy topic.
     Uses the user's own ntfy_topic if set, otherwise the global NTFY_TOPIC from .env.
     Tapping the notification opens their booking page directly.
     """
     topic = user.get("ntfy_topic", "").strip() or DEFAULT_NTFY_TOPIC
+    headers = {
+        "Title": title,
+        "Priority": priority,
+        "Tags": tags,
+        "Click": user["booking_url"],
+    }
+    if actions:
+        headers["Actions"] = actions
     resp = requests.post(
         f"{NTFY_URL}/{topic}",
         data=body.encode("utf-8"),
-        headers={
-            "Title": title,
-            "Priority": priority,
-            "Tags": tags,
-            "Click": user["booking_url"],
-        },
+        headers=headers,
         timeout=15,
     )
     resp.raise_for_status()
@@ -288,8 +292,9 @@ def check_and_notify(user: dict, already_notified: set, token_warned: list) -> s
         try:
             push(user,
                  title="EDL Trial Slot Available!",
-                 body=f"Available dates: {summary}\nTap to open booking page.",
-                 priority="max", tags="rotating_light")
+                 body=f"Available dates: {summary}\nAlert repeats every 5 min until slot is booked.",
+                 priority="max", tags="rotating_light",
+                 actions=f"view, Book Now, {user['booking_url']}, clear=true")
         except Exception as exc:
             log.error("[%s] Push failed: %s", name, exc)
             return already_notified  # retry next cycle
