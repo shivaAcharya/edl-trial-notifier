@@ -266,7 +266,7 @@ def check_and_notify(user: dict, already_notified: set, token_warned: list) -> s
             push(user,
                  title="EDL Notifier - STOPPED",
                  body="Bearer token expired. Update bearer_token in users.json to resume.",
-                 priority="urgent", tags="no_entry")
+                 priority="max", tags="no_entry")
         except Exception:
             pass
         # Skip this user but keep running for others
@@ -289,7 +289,7 @@ def check_and_notify(user: dict, already_notified: set, token_warned: list) -> s
             push(user,
                  title="EDL Trial Slot Available!",
                  body=f"Available dates: {summary}\nTap to open booking page.",
-                 priority="urgent", tags="rotating_light")
+                 priority="max", tags="rotating_light")
         except Exception as exc:
             log.error("[%s] Push failed: %s", name, exc)
             return already_notified  # retry next cycle
