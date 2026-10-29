@@ -51,10 +51,10 @@ DEFAULT_NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()           # shared fall
 TOKEN_WARN_DAYS = 2
 
 NTFY_URL    = "https://ntfy.sh"
-EDL_API_URL = (
-    "https://edl-public-api.lumbini.gov.np"
-    "/api/v1/web/applicant/application/date-availability"
-)
+EDL_API_BASE = "https://edl-public-api.lumbini.gov.np/api/v1/web/applicant/application"
+EDL_API_URL  = f"{EDL_API_BASE}/date-availability"
+GET_DATE_SLOTS_URL = f"{EDL_API_BASE}/get-date-slots"
+TRIAL_BOOK_URL     = f"{EDL_API_BASE}/trial/book"
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -220,6 +220,66 @@ def push(user: dict, title: str, body: str,
     log.info("[%s] Push sent → ntfy.sh/%s", user.get("name", "user"), topic)
 
 
+def book_slot(user: dict, slot: dict) -> bool:
+    """
+    Attempt to book a single slot for the given user via the EDL booking API.
+    Returns True on success (HTTP 200/201), False on any failure.
+
+    Booking is a two-step flow (reverse-engineered from the portal JS):
+      1. POST get-date-slots → fetch available time slots for the chosen date.
+      2. POST trial/book     → book with the first available time slot.
+    """
+    uuid = extract_uuid(user["booking_url"])
+    name = user.get("name", "user")
+    headers = {
+        "Authorization": f"Bearer {user['bearer_token']}",
+        "Origin": "https://edlvrs.lumbini.gov.np",
+        "Referer": "https://edlvrs.lumbini.gov.np/",
+        "Content-Type": "application/json",
+    }
+    params = {"application_uuid": uuid}
+
+    # Step 1: fetch available time slots for the chosen date
+    try:
+        slots_resp = requests.post(
+            GET_DATE_SLOTS_URL,
+            json={"date": slot["date"], "type": "TRIAL"},
+            headers=headers,
+            params=params,
+            timeout=15,
+        )
+        slots_resp.raise_for_status()
+        time_slots = slots_resp.json().get("data", [])
+    except requests.RequestException as exc:
+        log.error("[%s] Failed to fetch time slots for %s: %s", name, slot["date"], exc)
+        return False
+
+    if not time_slots:
+        log.warning("[%s] No time slots returned for %s — skipping.", name, slot["date"])
+        return False
+
+    # Step 2: book with the first available time slot
+    time_slot = time_slots[0]
+    log.info("[%s] Booking %s — time slot: %s", name, slot["date"], time_slot)
+    try:
+        resp = requests.post(
+            TRIAL_BOOK_URL,
+            json={"date": slot["date"], "time": time_slot},
+            headers=headers,
+            params=params,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            log.info("[%s] Booking SUCCESS for %s", name, slot["date"])
+            return True
+        log.warning("[%s] Booking failed (HTTP %d): %s",
+                    name, resp.status_code, resp.text[:300])
+        return False
+    except requests.RequestException as exc:
+        log.error("[%s] Booking request error: %s", name, exc)
+        return False
+
+
 # ── Core logic ────────────────────────────────────────────────────────────────
 
 def maybe_warn_token_expiry(user: dict, token_warned: list) -> None:
@@ -249,10 +309,14 @@ def maybe_warn_token_expiry(user: dict, token_warned: list) -> None:
             log.error("[%s] Could not send token warning: %s", user.get("name"), exc)
 
 
-def check_and_notify(user: dict, already_notified: set, token_warned: list) -> set:
+def check_and_notify(user: dict, already_notified: set,
+                     token_warned: list, booked: list) -> set:
     """
     Fetch availability for one user, compare against already-notified dates,
     and push for any newly available slots.
+
+    If the user has auto_book: true, attempts to book the earliest available
+    slot before falling back to notification-only behaviour.
 
     On a 401, sends a STOPPED notification to that user but does NOT exit —
     other users in the list continue to be monitored.
@@ -282,6 +346,39 @@ def check_and_notify(user: dict, already_notified: set, token_warned: list) -> s
     bookable = [s for s in slots if s.get("is_bookable") and s.get("available", 0) > 0]
     bookable_dates = {s["date"] for s in bookable}
     new_slots = [s for s in bookable if s["date"] not in already_notified]
+
+    # ── Auto-booking branch ───────────────────────────────────────────────────
+    if new_slots and user.get("auto_book") and not booked:
+        log.info("[%s] Auto-booking enabled — attempting to book earliest slot.", name)
+        for slot in sorted(new_slots, key=lambda s: s["date"]):
+            if book_slot(user, slot):
+                booked.append(slot["date"])
+                already_notified.update(s["date"] for s in new_slots)
+                already_notified &= bookable_dates
+                try:
+                    push(user,
+                         title="EDL Trial Slot BOOKED!",
+                         body=(
+                             f"Successfully booked: {slot['date']} "
+                             f"({slot['available']} slot(s) were available)"
+                         ),
+                         priority="max", tags="white_check_mark")
+                except Exception as exc:
+                    log.error("[%s] Booking confirmation push failed: %s", name, exc)
+                return already_notified
+        # All booking attempts failed — slots were taken before we could confirm
+        log.warning("[%s] All booking attempts failed — slots were taken.", name)
+        try:
+            push(user,
+                 title="EDL Slot appeared but was TAKEN",
+                 body=(
+                     f"Tried to book: {', '.join(s['date'] for s in new_slots)}\n"
+                     "All slots were taken before booking could complete. Monitoring continues."
+                 ),
+                 priority="high", tags="warning")
+        except Exception as exc:
+            log.error("[%s] Slot-taken push failed: %s", name, exc)
+        return already_notified
 
     if new_slots:
         summary = ", ".join(
@@ -387,17 +484,27 @@ def main() -> None:
         run_test(users)
         return
 
-    # Per-user state: set of already-notified dates + token-warned flag
-    state = [{"notified": set(), "token_warned": []} for _ in users]
+    # Per-user state: set of already-notified dates, token-warned flag, booked flag
+    state = [{"notified": set(), "token_warned": [], "booked": []} for _ in users]
 
     if args.once:
         for i, user in enumerate(users):
-            check_and_notify(user, state[i]["notified"], state[i]["token_warned"])
+            if state[i]["booked"]:
+                log.info("[%s] Already booked %s — skipping.",
+                         user.get("name"), state[i]["booked"][0])
+                continue
+            check_and_notify(
+                user, state[i]["notified"], state[i]["token_warned"], state[i]["booked"]
+            )
     else:
         while True:
             for i, user in enumerate(users):
+                if state[i]["booked"]:
+                    log.info("[%s] Already booked %s — skipping.",
+                             user.get("name"), state[i]["booked"][0])
+                    continue
                 state[i]["notified"] = check_and_notify(
-                    user, state[i]["notified"], state[i]["token_warned"]
+                    user, state[i]["notified"], state[i]["token_warned"], state[i]["booked"]
                 )
             log.info("Next check in %ds.", POLL_INTERVAL)
             time.sleep(POLL_INTERVAL)

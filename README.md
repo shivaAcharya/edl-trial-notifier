@@ -144,6 +144,53 @@ The workflow runs automatically every 5 minutes. No further action needed.
 
 ---
 
+## Auto-Booking
+
+When slots are highly competitive, enable auto-booking so the script books the earliest
+available slot the instant it appears — no manual action needed.
+
+The booking endpoints are hardcoded (reverse-engineered from the portal JS):
+- `POST /applicant/application/get-date-slots` — fetches available time slots for a date
+- `POST /applicant/application/trial/book` — books with the first available time slot
+
+No `.env` changes are required.
+
+### 1. Enable per user in `users.json`
+
+```json
+{
+  "name": "Shiva",
+  "booking_url": "https://edlvrs.lumbini.gov.np/edl/<UUID>",
+  "bearer_token": "eyJ...",
+  "application_id": "N562101",
+  "ntfy_topic": "edl-N562101",
+  "auto_book": true
+}
+```
+
+Users without `"auto_book": true` (or with `false`) keep the existing notify-only behaviour.
+
+### 2. Sync secrets to GitHub Actions
+
+```bash
+gh secret set USERS_CONFIG < users.json
+```
+
+### Behaviour
+
+- When a slot appears, the script tries to book the **earliest date** first.
+- On success: pushes **"EDL Trial Slot BOOKED!"** and stops monitoring that user.
+- If the slot is taken before the booking completes: pushes **"EDL Slot appeared but was TAKEN"**
+  and continues monitoring for the next opening.
+- Users without `auto_book: true` are unaffected.
+
+### Tip — reduce polling to 1 minute
+
+With competitive slots, reduce the cron-job.org trigger interval from 5 minutes to 1 minute.
+Update `POLL_INTERVAL_SECONDS=60` in `.env` and adjust the cron-job.org schedule accordingly.
+
+---
+
 ## Maintenance
 
 ### Refresh a bearer token (every ~15 days)
@@ -281,6 +328,8 @@ Keep the terminal open or run it in a background process / screen session.
 | `NTFY_TOPIC` | — | Fallback ntfy topic for users without a per-user `ntfy_topic` |
 | `POLL_INTERVAL_SECONDS` | `300` | Seconds between checks in continuous mode |
 | `SCAN_DAYS_AHEAD` | `60` | How many days ahead to scan for available slots |
+
+Per-user config (`booking_url`, `bearer_token`, `auto_book`, etc.) lives in `users.json`.
 
 ---
 
