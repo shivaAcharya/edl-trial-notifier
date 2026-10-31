@@ -378,6 +378,11 @@ def check_and_notify(user: dict, already_notified: set,
                  priority="high", tags="warning")
         except Exception as exc:
             log.error("[%s] Slot-taken push failed: %s", name, exc)
+        # Mark these dates as notified so the alert isn't re-sent every poll cycle.
+        # Pruning below removes them if they drop out of bookable_dates entirely,
+        # so they'll be retried if they genuinely reopen later.
+        already_notified.update(s["date"] for s in new_slots)
+        already_notified &= bookable_dates
         return already_notified
 
     if new_slots:
