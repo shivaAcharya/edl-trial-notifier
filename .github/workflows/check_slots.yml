@@ -66,6 +66,13 @@ jobs:
       - name: Write users config from secret
         run: echo '${{ secrets.USERS_CONFIG }}' > users.json
 
+      - name: Restore EDL state
+        uses: actions/cache/restore@v4
+        with:
+          path: edl_state.json
+          key: edl-state-${{ github.run_id }}
+          restore-keys: edl-state-
+
       - name: Check slots for all users
         env:
           NTFY_TOPIC:      ${{ secrets.NTFY_TOPIC }}
@@ -77,3 +84,10 @@ jobs:
           else
             python trial_slot_notifier.py --once
           fi
+
+      - name: Save EDL state
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: edl_state.json
+          key: edl-state-${{ github.run_id }}

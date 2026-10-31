@@ -50,6 +50,8 @@ DEFAULT_NTFY_TOPIC = os.getenv("NTFY_TOPIC", "").strip()           # shared fall
 
 TOKEN_WARN_DAYS = 2
 
+STATE_FILE  = os.getenv("EDL_STATE_FILE", "edl_state.json")
+
 NTFY_URL    = "https://ntfy.sh"
 EDL_API_BASE = "https://edl-public-api.lumbini.gov.np/api/v1/web/applicant/application"
 EDL_API_URL  = f"{EDL_API_BASE}/date-availability"
@@ -95,6 +97,29 @@ def load_users() -> list:
             )
 
     return users
+
+
+# ── State persistence (--once / GitHub Actions) ───────────────────────────────
+
+def _load_state() -> dict:
+    """Return persisted run state, or {} if the file is missing or unreadable."""
+    if not os.path.exists(STATE_FILE):
+        return {}
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception as exc:
+        log.warning("Could not read state file '%s': %s", STATE_FILE, exc)
+        return {}
+
+
+def _save_state(data: dict) -> None:
+    """Write run state so --once invocations share memory across cron runs."""
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as exc:
+        log.warning("Could not write state file '%s': %s", STATE_FILE, exc)
 
 
 # ── Token helpers ─────────────────────────────────────────────────────────────
@@ -493,14 +518,35 @@ def main() -> None:
     state = [{"notified": set(), "token_warned": [], "booked": []} for _ in users]
 
     if args.once:
+        persistent = _load_state()
+
         for i, user in enumerate(users):
-            if state[i]["booked"]:
-                log.info("[%s] Already booked %s — skipping.",
-                         user.get("name"), state[i]["booked"][0])
+            name = user.get("name", "user")
+            uuid = extract_uuid(user["booking_url"])
+            saved = persistent.get(uuid, {})
+
+            # Skip users already booked in a previous run
+            if saved.get("booked"):
+                log.info("[%s] Already booked %s (from previous run) — skipping.",
+                         name, saved["booked"])
                 continue
-            check_and_notify(
+
+            # For auto_book users, restore notified dates so the TAKEN alert
+            # isn't re-sent on every GitHub Actions invocation.
+            # Non-auto users intentionally re-notify each run, so no restore.
+            if user.get("auto_book"):
+                state[i]["notified"] = set(saved.get("notified", []))
+
+            state[i]["notified"] = check_and_notify(
                 user, state[i]["notified"], state[i]["token_warned"], state[i]["booked"]
             )
+
+            persistent[uuid] = {
+                "notified": sorted(state[i]["notified"]) if user.get("auto_book") else [],
+                "booked":   state[i]["booked"][0] if state[i]["booked"] else None,
+            }
+
+        _save_state(persistent)
     else:
         while True:
             for i, user in enumerate(users):
